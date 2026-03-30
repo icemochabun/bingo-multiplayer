@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Multiplayer Bingo</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+
+<!-- ===== HOME SCREEN ===== -->
+<div id="screen-home" class="screen active">
+  <div class="hero">
+    <h1 class="logo">🎱 BINGO</h1>
+    <p class="tagline">Play with a friend — scan, join, win!</p>
+    <button id="btn-create" class="btn btn-primary btn-lg">Create Game</button>
+    <div class="divider">or</div>
+    <div class="join-form">
+      <input id="input-room-code" type="text" placeholder="Enter room code" maxlength="8" />
+      <input id="input-join-name" type="text" placeholder="Your name" maxlength="20" />
+      <button id="btn-join-manual" class="btn btn-secondary">Join Game</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== LOBBY SCREEN (host) ===== -->
+<div id="screen-lobby" class="screen">
+  <div class="lobby-container">
+    <h2>Game Room</h2>
+    <div class="room-code-badge">
+      <span class="label">Room Code</span>
+      <span id="lobby-room-code" class="code">------</span>
+    </div>
+
+    <p class="invite-text">Share this QR code or link with your friend</p>
+    <div id="qr-container">
+      <img id="qr-image" src="" alt="QR Code" />
+    </div>
+    <div class="join-url-wrap">
+      <input id="join-url-display" type="text" readonly />
+      <button id="btn-copy-url" class="btn btn-sm">Copy</button>
+    </div>
+
+    <div id="lobby-players" class="player-list"></div>
+
+    <button id="btn-start" class="btn btn-primary btn-lg" disabled>
+      Waiting for player 2…
+    </button>
+  </div>
+</div>
+
+<!-- ===== JOIN SCREEN (guest) ===== -->
+<div id="screen-join" class="screen">
+  <div class="lobby-container">
+    <h2>Join Game</h2>
+    <p id="join-room-label" class="room-code-badge">
+      <span class="label">Room</span>
+      <span id="join-room-code-display" class="code"></span>
+    </p>
+    <input id="input-guest-name" type="text" placeholder="Your name" maxlength="20" class="input-lg" />
+    <button id="btn-confirm-join" class="btn btn-primary btn-lg">Join Game</button>
+    <div id="join-status" class="status-msg"></div>
+  </div>
+</div>
+
+<!-- ===== GAME SCREEN ===== -->
+<div id="screen-game" class="screen">
+  <header class="game-header">
+    <div class="room-info">Room: <span id="game-room-code"></span></div>
+    <div id="game-status-label" class="game-status"></div>
+    <div class="vs-badge" id="vs-badge"></div>
+  </header>
+
+  <main class="game-main">
+    <!-- Called number display -->
+    <section class="caller-section">
+      <div id="current-number-display" class="current-number">
+        <span class="num-letter" id="num-letter">-</span>
+        <span class="num-value" id="num-value">--</span>
+      </div>
+      <button id="btn-call" class="btn btn-call" style="display:none">Call Next Number</button>
+      <div id="called-numbers-grid" class="called-numbers-grid"></div>
+    </section>
+
+    <!-- Bingo card -->
+    <section class="card-section">
+      <div class="card-header-row">
+        <span>B</span><span>I</span><span>N</span><span>G</span><span>O</span>
+      </div>
+      <div id="bingo-card" class="bingo-card"></div>
+    </section>
+  </main>
+
+  <!-- Winner overlay -->
+  <div id="winner-overlay" class="overlay hidden">
+    <div class="overlay-box">
+      <div class="trophy">🏆</div>
+      <h2 id="winner-text"></h2>
+      <button id="btn-play-again" class="btn btn-primary btn-lg" style="display:none">Play Again</button>
+      <button id="btn-home" class="btn btn-secondary">Home</button>
+    </div>
+  </div>
+
+  <!-- Waiting overlay -->
+  <div id="waiting-overlay" class="overlay hidden">
+    <div class="overlay-box">
+      <div class="spinner"></div>
+      <p id="waiting-text">Waiting for host to start…</p>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
