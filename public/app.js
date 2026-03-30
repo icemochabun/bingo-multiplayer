@@ -251,19 +251,8 @@ async function createGame() {
     document.getElementById('lobby-room-code').textContent = id.toUpperCase();
     document.getElementById('join-url-display').value = joinUrl;
 
-    try {
-      new QRious({
-        element: document.getElementById('qr-canvas'),
-        value: joinUrl,
-        size: 220,
-        background: '#ffffff',
-        foreground: '#000000',
-        level: 'M',
-      });
-    } catch (e) {
-      console.error('QR generation failed', e);
-      document.getElementById('qr-container').textContent = 'QR unavailable — use the link below';
-    }
+    document.getElementById('qr-image').src =
+      `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(joinUrl)}`;
 
     renderPlayers(G.players);
     showScreen('screen-lobby');
