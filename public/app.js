@@ -251,8 +251,10 @@ async function createGame() {
     document.getElementById('lobby-room-code').textContent = id.toUpperCase();
     document.getElementById('join-url-display').value = joinUrl;
 
-    document.getElementById('qr-image').src =
-      `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(joinUrl)}`;
+    const qr = qrcode(0, 'M');
+    qr.addData(joinUrl);
+    qr.make();
+    document.getElementById('qr-image').src = qr.createDataURL(4, 4);
 
     renderPlayers(G.players);
     showScreen('screen-lobby');
