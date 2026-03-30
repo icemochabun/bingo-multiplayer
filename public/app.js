@@ -1,13 +1,81 @@
-/* ===== STATE ===== */
-const state = {
-  roomId: null,
-  playerId: null,
+/* ===================================================
+   MULTIPLAYER BINGO — PeerJS (fully static, no server)
+   Host = game authority. Guest connects via WebRTC.
+   =================================================== */
+
+/* ===== BINGO HELPERS ===== */
+
+function generateBingoCard() {
+  const ranges = [[1,15],[16,30],[31,45],[46,60],[61,75]];
+  const grid = [];
+  for (let row = 0; row < 5; row++) {
+    grid.push(ranges.map(([min, max]) => {
+      const pool = [];
+      while (pool.length < 5) {
+        const n = Math.floor(Math.random() * (max - min + 1)) + min;
+        if (!pool.includes(n)) pool.push(n);
+      }
+      return pool[row];
+    }));
+  }
+  grid[2][2] = 0; // FREE
+  return grid;
+}
+
+function generateCallBag() {
+  const nums = Array.from({ length: 75 }, (_, i) => i + 1);
+  for (let i = nums.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [nums[i], nums[j]] = [nums[j], nums[i]];
+  }
+  return nums;
+}
+
+function checkBingo(marked) {
+  for (let r = 0; r < 5; r++) if (marked[r].every(v => v)) return true;
+  for (let c = 0; c < 5; c++) if (marked.every(row => row[c])) return true;
+  if ([0,1,2,3,4].every(i => marked[i][i])) return true;
+  if ([0,1,2,3,4].every(i => marked[i][4-i])) return true;
+  return false;
+}
+
+function bingoLetter(n) {
+  if (n <= 15) return 'B';
+  if (n <= 30) return 'I';
+  if (n <= 45) return 'N';
+  if (n <= 60) return 'G';
+  return 'O';
+}
+
+function freshMarked() {
+  const m = Array.from({ length: 5 }, () => Array(5).fill(false));
+  m[2][2] = true;
+  return m;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+/* ===== GAME STATE ===== */
+const G = {
+  peer: null,
   isHost: false,
-  card: null,
-  marked: null,
+  myName: '',
+  myCard: null,
+  myMarked: null,
   calledNumbers: [],
-  roomStatus: 'waiting',
-  ws: null,
+  currentNumber: null,
+  status: 'idle',   // idle | waiting | playing | finished
+  players: [],      // [{id, name}]
+  winner: null,
+
+  // Host only
+  guestConn: null,
+  guestCard: null,
+  guestMarked: null,
+  callBag: [],
+  guestName: 'Player 2',
 };
 
 /* ===== SCREEN MANAGEMENT ===== */
@@ -16,30 +84,252 @@ function showScreen(id) {
   document.getElementById(id).classList.add('active');
 }
 
-/* ===== BINGO LETTER ===== */
-function bingoLetter(n) {
-  if (n >= 1 && n <= 15) return 'B';
-  if (n >= 16 && n <= 30) return 'I';
-  if (n >= 31 && n <= 45) return 'N';
-  if (n >= 46 && n <= 60) return 'G';
-  return 'O';
+/* ===== PEER MESSAGING ===== */
+function sendToGuest(type, payload) {
+  if (G.guestConn && G.guestConn.open) {
+    G.guestConn.send({ type, payload });
+  }
 }
 
-/* ===== RENDER BINGO CARD ===== */
-function renderCard(card, marked, calledNumbers) {
+function sendToHost(type, payload) {
+  if (G.peer && G.guestConn && G.guestConn.open) {
+    G.guestConn.send({ type, payload }); // G.guestConn is the host conn for guest
+  }
+}
+
+/* ===== HOST: HANDLE MESSAGES FROM GUEST ===== */
+function handleGuestMessage({ type, payload }) {
+  if (type === 'hello') {
+    G.guestName = payload.name || 'Player 2';
+    G.players = [
+      { id: 'host', name: G.myName },
+      { id: 'guest', name: G.guestName },
+    ];
+
+    // Send guest their card + current state
+    sendToGuest('welcome', {
+      card: G.guestCard,
+      marked: G.guestMarked,
+      players: G.players,
+      calledNumbers: G.calledNumbers,
+      currentNumber: G.currentNumber,
+      status: G.status,
+    });
+
+    // Update host UI
+    document.getElementById('btn-start').disabled = false;
+    document.getElementById('btn-start').textContent = 'Start Game!';
+    renderPlayers(G.players);
+    renderVsBadge(G.players);
+
+    showNotification('Player 2 joined! Start when ready.');
+  }
+
+  else if (type === 'markCell') {
+    const { row, col } = payload;
+    const val = G.guestCard[row][col];
+    if (val !== 0 && !G.calledNumbers.includes(val)) return; // not called yet
+    if (G.guestMarked[row][col]) return; // already marked
+
+    G.guestMarked[row][col] = true;
+    sendToGuest('cellMarked', { row, col, marked: G.guestMarked });
+
+    if (checkBingo(G.guestMarked)) {
+      endGame('guest');
+    }
+  }
+}
+
+/* ===== GUEST: HANDLE MESSAGES FROM HOST ===== */
+function handleHostMessage({ type, payload }) {
+  if (type === 'welcome') {
+    G.myCard = payload.card;
+    G.myMarked = payload.marked;
+    G.players = payload.players;
+    G.calledNumbers = payload.calledNumbers || [];
+    G.currentNumber = payload.currentNumber;
+    G.status = payload.status;
+
+    showScreen('screen-game');
+    document.getElementById('game-room-code').textContent =
+      document.getElementById('join-room-code-display').textContent;
+    renderCard();
+    renderCalledNumbers();
+    showCurrentNumber(G.currentNumber);
+    renderVsBadge(G.players);
+    updateGameUI();
+  }
+
+  else if (type === 'gameStarted') {
+    G.status = 'playing';
+    document.getElementById('waiting-overlay').classList.add('hidden');
+    updateGameUI();
+    renderCard();
+  }
+
+  else if (type === 'numberCalled') {
+    G.calledNumbers = payload.calledNumbers;
+    G.currentNumber = payload.number;
+    showCurrentNumber(payload.number);
+    renderCalledNumbers();
+    renderCard();
+  }
+
+  else if (type === 'cellMarked') {
+    G.myMarked = payload.marked;
+    renderCard();
+  }
+
+  else if (type === 'bingo') {
+    G.status = 'finished';
+    const isWinner = payload.winnerId === 'guest';
+    showWinnerOverlay(payload.winnerName, isWinner);
+  }
+
+  else if (type === 'newGame') {
+    G.myCard = payload.card;
+    G.myMarked = payload.marked;
+    G.calledNumbers = [];
+    G.currentNumber = null;
+    G.status = 'waiting';
+    G.winner = null;
+
+    document.getElementById('winner-overlay').classList.add('hidden');
+    showCurrentNumber(null);
+    renderCalledNumbers();
+    renderCard();
+    updateGameUI();
+    document.getElementById('waiting-overlay').classList.remove('hidden');
+    document.getElementById('waiting-text').textContent = 'Waiting for host to start…';
+  }
+
+  else if (type === 'hostLeft') {
+    showNotification('Host disconnected.');
+    document.getElementById('game-status-label').textContent = 'Host disconnected';
+  }
+}
+
+/* ===== HOST: END GAME ===== */
+function endGame(winnerId) {
+  G.status = 'finished';
+  G.winner = winnerId;
+  const winnerName = winnerId === 'host' ? G.myName : G.guestName;
+
+  sendToGuest('bingo', { winnerId, winnerName });
+  showWinnerOverlay(winnerName, winnerId === 'host');
+}
+
+/* ===== CREATE GAME (HOST) ===== */
+async function createGame() {
+  G.isHost = true;
+  G.myName = 'Player 1';
+  G.myCard = generateBingoCard();
+  G.myMarked = freshMarked();
+  G.guestCard = generateBingoCard();
+  G.guestMarked = freshMarked();
+  G.callBag = generateCallBag();
+  G.calledNumbers = [];
+  G.currentNumber = null;
+  G.status = 'waiting';
+  G.players = [{ id: 'host', name: G.myName }];
+
+  document.getElementById('btn-create').disabled = true;
+  document.getElementById('btn-create').textContent = 'Creating…';
+
+  G.peer = new Peer(undefined, { debug: 0 });
+
+  G.peer.on('open', async (id) => {
+    const joinUrl = `${location.origin}${location.pathname}?join=${id}`;
+    document.getElementById('lobby-room-code').textContent = id.slice(0, 8).toUpperCase();
+    document.getElementById('join-url-display').value = joinUrl;
+
+    try {
+      const qrUrl = await QRCode.toDataURL(joinUrl, { width: 256, margin: 2 });
+      document.getElementById('qr-image').src = qrUrl;
+    } catch (e) {
+      console.error('QR generation failed', e);
+    }
+
+    renderPlayers(G.players);
+    showScreen('screen-lobby');
+  });
+
+  G.peer.on('connection', (conn) => {
+    if (G.guestConn) {
+      conn.on('open', () => conn.send({ type: 'error', payload: { message: 'Room is full' } }));
+      return;
+    }
+    G.guestConn = conn;
+    conn.on('data', handleGuestMessage);
+    conn.on('close', () => {
+      G.guestConn = null;
+      if (G.status === 'playing') {
+        G.status = 'waiting';
+        showNotification('Guest disconnected');
+      }
+    });
+  });
+
+  G.peer.on('error', (err) => {
+    alert('PeerJS error: ' + err.message);
+    document.getElementById('btn-create').disabled = false;
+    document.getElementById('btn-create').textContent = 'Create Game';
+  });
+}
+
+/* ===== JOIN GAME (GUEST) ===== */
+function joinGame(hostPeerId, myName) {
+  G.isHost = false;
+  G.myName = myName || 'Player 2';
+
+  document.getElementById('btn-confirm-join').disabled = true;
+  document.getElementById('join-status').textContent = 'Connecting…';
+
+  G.peer = new Peer(undefined, { debug: 0 });
+
+  G.peer.on('open', () => {
+    const conn = G.peer.connect(hostPeerId, { reliable: true });
+    G.guestConn = conn; // reuse field; for guest it's the conn to host
+
+    conn.on('open', () => {
+      conn.send({ type: 'hello', payload: { name: G.myName } });
+      document.getElementById('join-status').textContent = 'Waiting for host…';
+    });
+
+    conn.on('data', handleHostMessage);
+
+    conn.on('close', () => {
+      handleHostMessage({ type: 'hostLeft', payload: {} });
+    });
+
+    conn.on('error', (err) => {
+      document.getElementById('join-status').textContent = 'Connection failed: ' + err.message;
+      document.getElementById('btn-confirm-join').disabled = false;
+    });
+  });
+
+  G.peer.on('error', (err) => {
+    document.getElementById('join-status').textContent = 'Error: ' + err.message;
+    document.getElementById('btn-confirm-join').disabled = false;
+  });
+}
+
+/* ===== UI RENDERERS ===== */
+
+function renderCard() {
   const grid = document.getElementById('bingo-card');
   grid.innerHTML = '';
+  if (!G.myCard) return;
+
   for (let row = 0; row < 5; row++) {
     for (let col = 0; col < 5; col++) {
-      const val = card[row][col];
-      const isMarked = marked[row][col];
+      const val = G.myCard[row][col];
+      const isMarked = G.myMarked[row][col];
       const isFree = val === 0;
-      const isCalled = calledNumbers.includes(val);
+      const isCalled = G.calledNumbers.includes(val);
 
       const cell = document.createElement('div');
       cell.className = 'bingo-cell';
-      cell.dataset.row = row;
-      cell.dataset.col = col;
 
       if (isFree) {
         cell.classList.add('free', 'marked');
@@ -53,7 +343,7 @@ function renderCard(card, marked, calledNumbers) {
         }
       }
 
-      if (!isMarked && !isFree && state.roomStatus === 'playing') {
+      if (!isMarked && !isFree && G.status === 'playing') {
         cell.addEventListener('click', () => onCellClick(row, col));
       }
 
@@ -62,308 +352,188 @@ function renderCard(card, marked, calledNumbers) {
   }
 }
 
-/* ===== UPDATE CALLED NUMBERS DISPLAY ===== */
-function renderCalledNumbers(calledNumbers) {
+function renderCalledNumbers() {
   const container = document.getElementById('called-numbers-grid');
   container.innerHTML = '';
-  calledNumbers.forEach((n, i) => {
+  G.calledNumbers.forEach((n, i) => {
     const chip = document.createElement('div');
     chip.className = 'called-chip';
-    if (i === calledNumbers.length - 1) chip.classList.add('latest');
+    if (i === G.calledNumbers.length - 1) chip.classList.add('latest');
     chip.textContent = n;
     container.appendChild(chip);
   });
 }
 
-/* ===== UPDATE CURRENT NUMBER ===== */
 function showCurrentNumber(n) {
-  if (n === null) {
-    document.getElementById('num-letter').textContent = '-';
-    document.getElementById('num-value').textContent = '--';
-  } else {
-    document.getElementById('num-letter').textContent = bingoLetter(n);
-    document.getElementById('num-value').textContent = n;
-  }
+  document.getElementById('num-letter').textContent = n ? bingoLetter(n) : '-';
+  document.getElementById('num-value').textContent = n ?? '--';
 }
 
-/* ===== UPDATE PLAYER LIST (LOBBY) ===== */
 function renderPlayers(players) {
   const list = document.getElementById('lobby-players');
+  if (!list) return;
   list.innerHTML = '';
   players.forEach((p, i) => {
     const item = document.createElement('div');
     item.className = 'player-item';
-    const badge = i === 0 ? '<span class="badge badge-host">Host</span>' : '<span class="badge badge-guest">Guest</span>';
+    const badge = i === 0
+      ? '<span class="badge badge-host">Host</span>'
+      : '<span class="badge badge-guest">Guest</span>';
     item.innerHTML = `<span class="player-name">${escapeHtml(p.name)}</span>${badge}`;
     list.appendChild(item);
   });
 }
 
-/* ===== UPDATE VS BADGE ===== */
 function renderVsBadge(players) {
   const badge = document.getElementById('vs-badge');
-  if (players.length >= 2) {
-    badge.textContent = `${players[0].name} vs ${players[1].name}`;
-  } else {
-    badge.textContent = '';
+  if (players && players.length >= 2) {
+    badge.textContent = `${escapeHtml(players[0].name)} vs ${escapeHtml(players[1].name)}`;
   }
 }
 
-/* ===== WEBSOCKET ===== */
-function connectWS(onOpen) {
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const ws = new WebSocket(`${proto}://${location.host}`);
-  state.ws = ws;
-
-  ws.onopen = onOpen;
-
-  ws.onmessage = (event) => {
-    const msg = JSON.parse(event.data);
-    handleMessage(msg);
-  };
-
-  ws.onclose = () => {
-    document.getElementById('game-status-label').textContent = 'Disconnected';
-  };
-
-  ws.onerror = () => {
-    alert('Connection error. Please refresh.');
-  };
-}
-
-function sendWS(type, payload) {
-  if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-    state.ws.send(JSON.stringify({ type, payload }));
-  }
-}
-
-/* ===== HANDLE INCOMING MESSAGES ===== */
-function handleMessage(msg) {
-  const { type, payload } = msg;
-
-  if (type === 'error') {
-    alert(payload.message);
-    return;
-  }
-
-  if (type === 'joined') {
-    state.playerId = payload.playerId;
-    state.isHost = payload.isHost;
-    state.card = payload.card;
-    state.marked = payload.marked;
-    state.roomStatus = payload.roomState.status;
-    state.calledNumbers = payload.roomState.calledNumbers;
-
-    showScreen('screen-game');
-    document.getElementById('game-room-code').textContent = state.roomId;
-    renderCard(state.card, state.marked, state.calledNumbers);
-    showCurrentNumber(payload.roomState.currentNumber);
-    renderCalledNumbers(state.calledNumbers);
-    renderVsBadge(payload.roomState.players);
-    updateGameUI(payload.roomState);
-  }
-
-  else if (type === 'roomUpdate') {
-    renderPlayers(payload.players);
-    renderVsBadge(payload.players);
-    updateGameUI(payload);
-
-    // Enable start button if 2 players
-    const startBtn = document.getElementById('btn-start');
-    if (startBtn) {
-      if (payload.players.length >= 2) {
-        startBtn.disabled = false;
-        startBtn.textContent = 'Start Game!';
-      } else {
-        startBtn.disabled = true;
-        startBtn.textContent = 'Waiting for player 2…';
-      }
-    }
-  }
-
-  else if (type === 'playerJoined') {
-    const startBtn = document.getElementById('btn-start');
-    if (startBtn) {
-      startBtn.disabled = false;
-      startBtn.textContent = 'Start Game!';
-    }
-  }
-
-  else if (type === 'gameStarted') {
-    state.roomStatus = 'playing';
-    document.getElementById('waiting-overlay').classList.add('hidden');
-    document.getElementById('game-status-label').textContent = 'Game in progress';
-    updateGameUI(payload);
-    renderCard(state.card, state.marked, state.calledNumbers);
-  }
-
-  else if (type === 'numberCalled') {
-    state.calledNumbers = payload.calledNumbers;
-    showCurrentNumber(payload.number);
-    renderCalledNumbers(state.calledNumbers);
-    // Highlight callable cells
-    renderCard(state.card, state.marked, state.calledNumbers);
-  }
-
-  else if (type === 'cellMarked') {
-    state.marked = payload.marked;
-    renderCard(state.card, state.marked, state.calledNumbers);
-  }
-
-  else if (type === 'bingo') {
-    state.roomStatus = 'finished';
-    const isWinner = payload.winnerId === state.playerId;
-    showWinnerOverlay(payload.winnerName, isWinner);
-    document.getElementById('btn-play-again').style.display = state.isHost ? 'block' : 'none';
-  }
-
-  else if (type === 'playerLeft') {
-    state.roomStatus = payload.status;
-    document.getElementById('game-status-label').textContent = 'Opponent disconnected';
-    document.getElementById('waiting-overlay').classList.remove('hidden');
-    document.getElementById('waiting-text').textContent = 'Opponent disconnected. Waiting…';
-  }
-
-  else if (type === 'newGame') {
-    state.card = payload.card;
-    state.marked = payload.marked;
-    state.calledNumbers = [];
-    state.roomStatus = payload.roomState.status;
-
-    document.getElementById('winner-overlay').classList.add('hidden');
-    showCurrentNumber(null);
-    renderCalledNumbers([]);
-    renderCard(state.card, state.marked, []);
-    updateGameUI(payload.roomState);
-
-    if (!state.isHost) {
-      document.getElementById('waiting-overlay').classList.remove('hidden');
-      document.getElementById('waiting-text').textContent = 'Waiting for host to start…';
-    }
-  }
-}
-
-function updateGameUI(roomState) {
+function updateGameUI() {
   const callBtn = document.getElementById('btn-call');
   if (callBtn) {
-    callBtn.style.display = (state.isHost && roomState.status === 'playing') ? 'block' : 'none';
+    callBtn.style.display = (G.isHost && G.status === 'playing') ? 'block' : 'none';
   }
 
-  if (roomState.status === 'waiting' && !state.isHost) {
-    document.getElementById('waiting-overlay').classList.remove('hidden');
+  const waitingOverlay = document.getElementById('waiting-overlay');
+  if (G.status === 'waiting' && !G.isHost) {
+    waitingOverlay.classList.remove('hidden');
     document.getElementById('waiting-text').textContent = 'Waiting for host to start…';
-  } else if (roomState.status === 'playing') {
-    document.getElementById('waiting-overlay').classList.add('hidden');
+  } else if (G.status === 'playing') {
+    waitingOverlay.classList.add('hidden');
   }
 
-  const statusLabel = document.getElementById('game-status-label');
-  if (statusLabel) {
-    if (roomState.status === 'waiting') statusLabel.textContent = 'Waiting to start…';
-    else if (roomState.status === 'playing') statusLabel.textContent = 'Game in progress';
-    else if (roomState.status === 'finished') statusLabel.textContent = 'Game over';
+  const label = document.getElementById('game-status-label');
+  if (label) {
+    const map = { waiting: 'Waiting to start…', playing: 'Game in progress', finished: 'Game over' };
+    label.textContent = map[G.status] || '';
   }
 }
 
-function showWinnerOverlay(winnerName, isWinner) {
+function showWinnerOverlay(winnerName, isMe) {
   const overlay = document.getElementById('winner-overlay');
-  const text = document.getElementById('winner-text');
+  document.getElementById('winner-text').textContent = isMe ? 'BINGO! You win! 🎉' : `${escapeHtml(winnerName)} got BINGO!`;
   overlay.classList.remove('hidden');
-  if (isWinner) {
-    text.textContent = 'BINGO! You win! 🎉';
+  document.getElementById('btn-play-again').style.display = G.isHost ? 'block' : 'none';
+}
+
+function showNotification(msg) {
+  const label = document.getElementById('game-status-label');
+  if (label) label.textContent = msg;
+}
+
+/* ===== ACTIONS ===== */
+
+function onCellClick(row, col) {
+  if (G.status !== 'playing') return;
+
+  if (G.isHost) {
+    const val = G.myCard[row][col];
+    if (val !== 0 && !G.calledNumbers.includes(val)) return;
+    if (G.myMarked[row][col]) return;
+    G.myMarked[row][col] = true;
+    renderCard();
+    if (checkBingo(G.myMarked)) endGame('host');
   } else {
-    text.textContent = `${escapeHtml(winnerName)} got BINGO!`;
+    sendToHost('markCell', { row, col });
   }
 }
 
-/* ===== CELL CLICK ===== */
-function onCellClick(row, col) {
-  if (state.roomStatus !== 'playing') return;
-  sendWS('markCell', { row, col });
+function callNextNumber() {
+  if (!G.isHost || G.status !== 'playing' || G.callBag.length === 0) return;
+  const num = G.callBag.pop();
+  G.currentNumber = num;
+  G.calledNumbers.push(num);
+  showCurrentNumber(num);
+  renderCalledNumbers();
+  renderCard();
+  sendToGuest('numberCalled', { number: num, calledNumbers: G.calledNumbers });
 }
 
-/* ===== CREATE GAME (HOST) ===== */
-async function createGame() {
-  const res = await fetch('/api/rooms', { method: 'POST' });
-  if (!res.ok) { alert('Failed to create room'); return; }
-  const data = await res.json();
+function startGame() {
+  if (!G.isHost || !G.guestConn) return;
+  G.status = 'playing';
+  sendToGuest('gameStarted', { status: 'playing' });
+  showScreen('screen-game');
+  document.getElementById('game-room-code').textContent =
+    document.getElementById('lobby-room-code').textContent;
+  G.players = [{ id: 'host', name: G.myName }, { id: 'guest', name: G.guestName }];
+  renderVsBadge(G.players);
+  renderCard();
+  renderCalledNumbers();
+  showCurrentNumber(null);
+  updateGameUI();
+}
 
-  state.roomId = data.roomId;
+function playAgain() {
+  G.myCard = generateBingoCard();
+  G.myMarked = freshMarked();
+  G.guestCard = generateBingoCard();
+  G.guestMarked = freshMarked();
+  G.callBag = generateCallBag();
+  G.calledNumbers = [];
+  G.currentNumber = null;
+  G.status = 'waiting';
+  G.winner = null;
 
-  document.getElementById('lobby-room-code').textContent = data.roomId;
-  document.getElementById('qr-image').src = data.qrDataUrl;
-  document.getElementById('join-url-display').value = data.joinUrl;
-
-  showScreen('screen-lobby');
-
-  connectWS(() => {
-    sendWS('join', { roomId: data.roomId, playerName: 'Player 1' });
+  sendToGuest('newGame', {
+    card: G.guestCard,
+    marked: G.guestMarked,
   });
+
+  document.getElementById('winner-overlay').classList.add('hidden');
+  showCurrentNumber(null);
+  renderCalledNumbers();
+  renderCard();
+  updateGameUI();
 }
 
-/* ===== JOIN GAME (GUEST) ===== */
-function joinGame(roomId, playerName) {
-  state.roomId = roomId.toUpperCase();
-  connectWS(() => {
-    sendWS('join', { roomId: state.roomId, playerName: playerName || 'Player 2' });
-  });
-}
+/* ===== BUTTON WIRING ===== */
 
-/* ===== ESCAPE HTML ===== */
-function escapeHtml(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-/* ===== WIRE UP BUTTONS ===== */
 document.getElementById('btn-create').addEventListener('click', createGame);
 
 document.getElementById('btn-join-manual').addEventListener('click', () => {
   const code = document.getElementById('input-room-code').value.trim();
   const name = document.getElementById('input-join-name').value.trim();
   if (!code) { alert('Enter a room code'); return; }
+  // Manual join: code is the full peer ID or the 8-char prefix
+  // We store it as-is; host generated peer IDs can be long
   joinGame(code, name);
 });
 
-document.getElementById('btn-start').addEventListener('click', () => {
-  sendWS('startGame', {});
-});
+document.getElementById('btn-start').addEventListener('click', startGame);
 
-document.getElementById('btn-call').addEventListener('click', () => {
-  sendWS('callNumber', {});
-});
+document.getElementById('btn-call').addEventListener('click', callNextNumber);
 
 document.getElementById('btn-copy-url').addEventListener('click', () => {
-  const url = document.getElementById('join-url-display').value;
-  navigator.clipboard.writeText(url).then(() => {
-    document.getElementById('btn-copy-url').textContent = 'Copied!';
-    setTimeout(() => { document.getElementById('btn-copy-url').textContent = 'Copy'; }, 1500);
-  });
+  navigator.clipboard.writeText(document.getElementById('join-url-display').value)
+    .then(() => {
+      const btn = document.getElementById('btn-copy-url');
+      btn.textContent = 'Copied!';
+      setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+    });
 });
 
-document.getElementById('btn-play-again').addEventListener('click', () => {
-  sendWS('playAgain', {});
-});
+document.getElementById('btn-play-again').addEventListener('click', playAgain);
 
 document.getElementById('btn-home').addEventListener('click', () => {
-  location.href = '/';
+  location.href = location.origin + location.pathname;
 });
 
 document.getElementById('btn-confirm-join').addEventListener('click', () => {
   const name = document.getElementById('input-guest-name').value.trim();
-  const code = document.getElementById('join-room-code-display').textContent.trim();
-  document.getElementById('join-status').textContent = 'Connecting…';
-  joinGame(code, name);
+  const peerId = document.getElementById('join-room-code-display').textContent.trim();
+  joinGame(peerId, name);
 });
 
-/* ===== HANDLE /join/:roomId route ===== */
+/* ===== AUTO-JOIN FROM URL ===== */
 (function checkJoinRoute() {
-  const match = location.pathname.match(/^\/join\/([A-Za-z0-9]+)$/);
-  if (match) {
-    const roomId = match[1].toUpperCase();
-    document.getElementById('join-room-code-display').textContent = roomId;
+  const params = new URLSearchParams(location.search);
+  const peerId = params.get('join');
+  if (peerId) {
+    document.getElementById('join-room-code-display').textContent = peerId;
     showScreen('screen-join');
   }
 })();
