@@ -7,19 +7,26 @@
 
 function generateBingoCard() {
   const ranges = [[1,15],[16,30],[31,45],[46,60],[61,75]];
-  const grid = [];
-  for (let row = 0; row < 5; row++) {
-    grid.push(ranges.map(([min, max]) => {
-      const pool = [];
-      while (pool.length < 5) {
-        const n = Math.floor(Math.random() * (max - min + 1)) + min;
-        if (!pool.includes(n)) pool.push(n);
-      }
-      return pool[row];
-    }));
-  }
+  // Generate 5 unique numbers per column first, then build rows
+  const cols = ranges.map(([min, max]) => {
+    const pool = [];
+    while (pool.length < 5) {
+      const n = Math.floor(Math.random() * (max - min + 1)) + min;
+      if (!pool.includes(n)) pool.push(n);
+    }
+    return pool;
+  });
+  const grid = Array.from({ length: 5 }, (_, row) => cols.map(col => col[row]));
   grid[2][2] = 0; // FREE
   return grid;
+}
+
+function makeRoomCode() {
+  // Short 6-char code that doubles as the PeerJS peer ID
+  const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
+  let code = '';
+  for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  return code;
 }
 
 function generateCallBag() {
@@ -236,18 +243,24 @@ async function createGame() {
   document.getElementById('btn-create').disabled = true;
   document.getElementById('btn-create').textContent = 'Creating…';
 
-  G.peer = new Peer(undefined, { debug: 0 });
+  const roomCode = makeRoomCode();
+  G.peer = new Peer(roomCode, { debug: 0 });
 
   G.peer.on('open', async (id) => {
     const joinUrl = `${location.origin}${location.pathname}?join=${id}`;
-    document.getElementById('lobby-room-code').textContent = id.slice(0, 8).toUpperCase();
+    document.getElementById('lobby-room-code').textContent = id.toUpperCase();
     document.getElementById('join-url-display').value = joinUrl;
 
     try {
-      const qrUrl = await QRCode.toDataURL(joinUrl, { width: 256, margin: 2 });
-      document.getElementById('qr-image').src = qrUrl;
+      if (typeof QRCode !== 'undefined') {
+        const qrUrl = await QRCode.toDataURL(joinUrl, { width: 256, margin: 2 });
+        document.getElementById('qr-image').src = qrUrl;
+      } else {
+        document.getElementById('qr-container').textContent = 'QR unavailable — use the link below';
+      }
     } catch (e) {
       console.error('QR generation failed', e);
+      document.getElementById('qr-container').textContent = 'QR unavailable — use the link below';
     }
 
     renderPlayers(G.players);
@@ -271,7 +284,14 @@ async function createGame() {
   });
 
   G.peer.on('error', (err) => {
-    alert('PeerJS error: ' + err.message);
+    if (err.type === 'unavailable-id') {
+      // Collision on short code — retry silently
+      G.peer.destroy();
+      G.peer = null;
+      createGame();
+      return;
+    }
+    alert('Connection error: ' + (err.message || err.type) + '\nMake sure you are online.');
     document.getElementById('btn-create').disabled = false;
     document.getElementById('btn-create').textContent = 'Create Game';
   });
@@ -495,11 +515,9 @@ function playAgain() {
 document.getElementById('btn-create').addEventListener('click', createGame);
 
 document.getElementById('btn-join-manual').addEventListener('click', () => {
-  const code = document.getElementById('input-room-code').value.trim();
+  const code = document.getElementById('input-room-code').value.trim().toLowerCase();
   const name = document.getElementById('input-join-name').value.trim();
   if (!code) { alert('Enter a room code'); return; }
-  // Manual join: code is the full peer ID or the 8-char prefix
-  // We store it as-is; host generated peer IDs can be long
   joinGame(code, name);
 });
 
