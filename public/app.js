@@ -252,12 +252,14 @@ async function createGame() {
     document.getElementById('join-url-display').value = joinUrl;
 
     try {
-      if (typeof QRCode !== 'undefined') {
-        const qrUrl = await QRCode.toDataURL(joinUrl, { width: 256, margin: 2 });
-        document.getElementById('qr-image').src = qrUrl;
-      } else {
-        document.getElementById('qr-container').textContent = 'QR unavailable — use the link below';
-      }
+      new QRious({
+        element: document.getElementById('qr-canvas'),
+        value: joinUrl,
+        size: 220,
+        background: '#ffffff',
+        foreground: '#000000',
+        level: 'M',
+      });
     } catch (e) {
       console.error('QR generation failed', e);
       document.getElementById('qr-container').textContent = 'QR unavailable — use the link below';
